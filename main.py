@@ -10,7 +10,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def main():
-    """Основная функция запуска бота и монитора"""
     logger.info("Запуск Solana Meme Coin Bot и Монитора...")
     directories = [
         'config', 
@@ -34,7 +33,6 @@ async def main():
         logger.warning(f"Создан файл конфигурации по умолчанию: {bot_config_path}")
         logger.warning("Пожалуйста, добавьте ваш токен Telegram бота в этот файл!")
         return
-    
     try:
         with open(bot_config_path, 'r') as f:
             bot_config = json.load(f)
@@ -47,7 +45,6 @@ async def main():
         logger.info("Добавьте ваш токен в файл config/bot_config.json")
         return
     bot = Bot(token=bot_token)
-    
     try:
         await asyncio.gather(
             run_bot(bot),
