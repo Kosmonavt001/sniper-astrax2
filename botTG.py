@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from solders.keypair import Keypair
 import base58
 import requests
 
+from filters import check_token_scam_risk
 from keyboards import create_main_menu, create_wallet_menu
 from wallet_manager import WalletManager
 from trader import get_user_config, get_purchased_tokens_info
@@ -358,7 +360,21 @@ def get_last_found_token_info() -> dict:
     except Exception as e:
         logger.error(f"Ошибка при получении информации о последнем найденном токене: {e}")
     return {} # Возвращаем пустой словарь, если файл не существует или ошибка
+@dp.callback_query(lambda c: c.data.startswith("refresh_"))
+async def refresh_price(callback_query: types.CallbackQuery):
+    token_address = callback_query.data.replace("refresh_", "")
+    scam_info = await check_token_scam_risk(token_address)
+    
+    if scam_info["has_pairs"]:
+        new_text = (
+            f"💰 <b>Текущая цена</b>: ${float(scam_info['price_usd']):.8f} USD\n"
+            f"🔄 Обновлено: {datetime.now(datetime.timezone.utc).strftime('%H:%M:%S UTC')}"
+        )
+    else:
+        new_text = "❌ Не удалось получить актуальную цену."
 
+    await callback_query.answer()
+    await callback_query.message.edit_caption(caption=new_text, parse_mode="HTML")
 @dp.message(CommandStart())
 async def start_command(message: Message, state: FSMContext):
     """Обработка команды /start"""
@@ -498,57 +514,45 @@ async def get_wallet_address(message: Message, state: FSMContext):
     await state.update_data(wallet_address=wallet_address)
     await state.set_state(WalletStates.waiting_for_mnemonic)
     await message.answer(
-        "🔑 Введите вашу seed фразу (12 или 24 слова):\n\n"
-        "<b>⚠️ ВНИМАНИЕ:</b> Seed фраза дает полный доступ к кошельку! "
-        "Бот хранит ее локально и безопасно.\n\n"
-        "Введите слова через пробел:",
+        "🔑 Введите ваш приватный ключ (Base58, ~88 символов):"
+        "<b>⚠️ ВНИМАНИЕ:</b> Это даёт полный доступ к кошельку! "
+        "Бот хранит его локально. Убедитесь, что доверяете этому сервису."
+        "Пример: 5HvGqjXoKZ7BdYJU2eFQvDpV1hR7tWzgkE3rN9xTmSsP...",
         parse_mode="HTML",
         reply_markup=InlineKeyboardBuilder().button(text="⬅️ Назад", callback_data="my_wallet").as_markup()
     )
 
 @dp.message(WalletStates.waiting_for_mnemonic)
-async def get_mnemonic(message: Message, state: FSMContext):
-    """Получение seed фразы и добавление кошелька"""
-    # Проверяем формат seed фразы
-    words = message.text.strip().split()
-    
-    if len(words) not in [12, 24]:
-        await message.answer("❌ Seed фраза должна содержать 12 или 24 слова. Попробуйте еще раз:")
+async def get_private_key(message: Message, state: FSMContext):
+    """Получение приватного ключа и добавление кошелька"""
+    private_key_b58 = message.text.strip()
+
+    # Проверка формата Base58 (простая проверка)
+    if len(private_key_b58) < 80 or len(private_key_b58) > 96:
+        await message.answer("❌ Приватный ключ должен быть строкой Base58 длиной ~88 символов. Попробуйте снова:")
         return
-    
-    mnemonic_phrase = ' '.join(words)
-    
-    # Проверяем валидность mnemonic
-    try:
-        mnemo = Mnemonic("english")
-        if not mnemo.check(mnemonic_phrase):
-            await message.answer("❌ Неверная seed фраза. Проверьте правильность слов и попробуйте еще раз:")
-            return
-    except Exception as e:
-        await message.answer("❌ Ошибка проверки seed фразы. Попробуйте еще раз:")
-        return
-    
+
     # Получаем данные из состояния
     user_data = await state.get_data()
     wallet_name = user_data.get('wallet_name')
     wallet_address = user_data.get('wallet_address')
     user_id = message.from_user.id
-    
-    # Добавляем кошелек с генерацией приватного ключа (без проверки соответствия адреса)
-    success = wallet_manager.add_wallet(user_id, wallet_name, wallet_address, mnemonic_phrase)
-    
+
+    # Добавляем кошелек с приватным ключом
+    success = wallet_manager.add_wallet(user_id, wallet_name, wallet_address, private_key_b58)
+
     if success:
         await state.clear()
         await message.answer(
-            f"✅ Кошелек <b>{wallet_name}</b> успешно добавлен!\n"
-            f"📬 Адрес: <code>{wallet_address[:6]}...{wallet_address[-4:]}</code>\n"
-            f"🔐 Приватный ключ сгенерирован и сохранен для использования в API",
+            f"✅ Кошелек <b>{wallet_name}</b> успешно добавлен!"
+            f"📬 Адрес: <code>{wallet_address[:6]}...{wallet_address[-4:]}</code>"
+            f"🔐 Приватный ключ сохранён для использования в API",
             parse_mode="HTML",
             reply_markup=create_main_menu()
         )
     else:
         await message.answer(
-            "❌ Ошибка добавления кошелька. Попробуйте еще раз.",
+            "❌ Не удалось добавить кошелек. Убедитесь, что приватный ключ корректен и соответствует адресу.",
             reply_markup=create_main_menu()
         )
 
