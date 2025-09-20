@@ -49,53 +49,42 @@ class WalletManager:
         except Exception as e:
             logger.error(f"Ошибка сохранения конфига пользователя {user_id}: {e}")
 
-    def add_wallet(self, user_id: int, name: str, address: str, mnemonic: str,
-                  # --- ИЗМЕНЕНО: Убраны фиксированные значения по умолчанию ---
-                  # purchase_price_usdt: float = 100.0,
-                  # target_x2: float = 200.0,
-                  # target_x3: float = 300.0,
-                  # target_x4: float = 400.0
-                  # --- НОВОЕ: Добавлены новые параметры по умолчанию ---
-                  trade_percentage: float = 1.0, # 1% от баланса
-                  profit_percentage: float = 100.0 # 100% прибыль (x2)
-                  ) -> bool:
-        """Добавляет новый кошелек с генерацией приватного ключа из seed фразы"""
+    def add_wallet(self, user_id: int, name: str, address: str, private_key_b58: str,
+               trade_percentage: float = 1.0,
+               profit_percentage: float = 100.0) -> bool:
+        """Добавляет кошелёк по имени, адресу и приватному ключу (Base58)"""
         try:
-            # Проверяем валидность mnemonic фразы
-            mnemo = Mnemonic("english")
-            if not mnemo.check(mnemonic):
-                raise ValueError("Неверная seed фраза")
-            # Генерируем приватный ключ из seed фразы
-            seed = mnemo.to_seed(mnemonic)
-            private_key_bytes = seed[:32]
-            keypair = Keypair.from_seed(private_key_bytes)
-            private_key_full = bytes(keypair)
-            private_key_b58 = base58.b58encode(private_key_full).decode('utf-8')
-            # Загружаем текущую конфигурацию пользователя
+            # Декодируем приватный ключ из Base58
+            private_key_bytes = base58.b58decode(private_key_b58)
+
+            # Пытаемся создать Keypair из байтов
+            keypair = Keypair.from_bytes(private_key_bytes)
+            derived_pubkey = str(keypair.pubkey())
+
+            # Опционально: проверяем соответствие адресов
+            if derived_pubkey != address:
+                raise ValueError(f"Приватный ключ соответствует адресу {derived_pubkey}, "
+                                f"но указан {address}. Несоответствие!")
+
+            # Готовим конфиг
             user_config = self.load_user_config(user_id)
-            # Инициализируем кошельки если нужно
             if "wallets" not in user_config:
                 user_config["wallets"] = {}
-            # Добавляем кошелек с seed фразой и приватным ключом
+
+            # Сохраняем только приватный ключ (без мнемоники)
             user_config["wallets"][name] = {
                 "address": address,
-                "mnemonic": mnemonic,
-                "private_key": private_key_b58,
+                "private_key": private_key_b58,  # сохраняем как строку
                 "created_at": str(time.time()),
-                # --- УДАЛЕНО: Старые фиксированные параметры ---
-                # "purchase_price_usdt": purchase_price_usdt,
-                # "target_x2": target_x2,
-                # "target_x3": target_x3,
-                # "target_x4": target_x4
-                # --- НОВОЕ: Новые параметры ---
                 "trade_percentage": trade_percentage,
                 "profit_percentage": profit_percentage
             }
-            # Сохраняем обновленную конфигурацию
+
             self.save_user_config(user_id, user_config)
             return True
+
         except Exception as e:
-            logger.error(f"Ошибка добавления кошелька для пользователя {user_id}: {e}")
+            logger.error(f"Ошибка добавления кошелька через приватный ключ: {e}")
             return False
         
     def get_user_wallets(self, user_id: int) -> dict:
