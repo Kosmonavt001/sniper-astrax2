@@ -21,7 +21,7 @@ DEXSCREENER_TOKEN_PAIRS_URL = "https://api.dexscreener.com/tokens/v1/solana/"
 ALLOWED_DEX = ["raydium", "pumpswap"]
 
 # Максимальное время существования токена (в минутах)
-MAX_AGE_MINUTES = 50  # 12 часов
+MAX_AGE_MINUTES = 10 # 12 часов
 # Желаемое максимальное время (для логирования)
 DESIRED_MAX_AGE_MINUTES = 2  # 1 час
 
