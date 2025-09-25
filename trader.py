@@ -166,11 +166,7 @@ def decode_jupiter_transaction(tx_data: str) -> bytes:
 
 def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amount: int,
                                         slippage: int, user_public_key: str) -> dict:
-    """
-    Получает base64-кодированную транзакцию свопа через Jupiter Swap API.
-    """
     try:
-        # 1. Получаем quote
         quote_url = f"{JUPITER_QUOTE_URL}?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={slippage}"
         quote_response = requests.get(quote_url, timeout=10)
 
@@ -180,7 +176,6 @@ def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amo
 
         quote_data = quote_response.json()
 
-        # 2. Формируем payload для получения транзакции свопа
         swap_payload = {
             "userPublicKey": user_public_key,
             "quoteResponse": quote_data,
@@ -189,7 +184,6 @@ def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amo
             "useSharedAccounts": False,
         }
 
-        # 3. Отправляем запрос на получение транзакции
         headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -197,7 +191,6 @@ def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amo
         swap_response = requests.post(JUPITER_SWAP_URL, json=swap_payload, headers=headers, timeout=10)
 
         if swap_response.status_code != 200:
-            # Пробуем с useSharedAccounts=True как fallback
             swap_payload["useSharedAccounts"] = True
             swap_response = requests.post(JUPITER_SWAP_URL, json=swap_payload, headers=headers, timeout=10)
 
@@ -206,7 +199,7 @@ def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amo
             logger.error(f"Response: {swap_response.text}")
             return None
 
-        return swap_response.json()  # Возвращает { "swapTransaction": "...", ... }
+        return swap_response.json()
 
     except Exception as e:
         logger.error(f"Ошибка в функции получения транзакции свопа: {e}")
@@ -225,7 +218,6 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
     token_name = token_metadata.get('name', 'Unknown')
     token_symbol = token_metadata.get('symbol', 'UNKNOWN')
 
-    # Отправляем анализ в группу
     try:
         await send_token_analysis_to_group(bot, token_address)
     except Exception as e:
@@ -267,33 +259,25 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
         return False
 
     try:
-        # --- ЕДИНЫЙ БЛОК РАСЧЕТОВ ---
-        
-        # 1. Получаем цену SOL в USDT
         sol_price_usdt = get_sol_usdt_price()
         if sol_price_usdt <= 0:
             raise Exception("Failed to get SOL price")
 
-        # 2. Получаем баланс кошелька
         wallet_balance_sol = wm.get_wallet_balance_solana(wallet_address)
         if wallet_balance_sol <= 0:
             raise Exception("Failed to get wallet balance")
 
-        # 3. Получаем текущую цену токена
         current_price_usdt = await get_token_current_price(token_address)
         if current_price_usdt <= 0:
             raise Exception("Failed to get token price")
 
-        # 4. Рассчитываем сумму покупки
         wallet_balance_usdt = wallet_balance_sol * sol_price_usdt
         purchase_amount_usdt = wallet_balance_usdt * (trade_percentage / 100.0)
         purchase_amount_sol = purchase_amount_usdt / sol_price_usdt
 
-        # 5. Логируем после всех расчетов
         logger.info(f"Кошелек {wallet_name}: Баланс {wallet_balance_sol:.6f} SOL ({wallet_balance_usdt:.6f} USDT). "
                     f"Покупка на {trade_percentage}% = {purchase_amount_sol:.6f} SOL ({purchase_amount_usdt:.6f} USDT).")
 
-        # 6. Проверяем достаточность средств (включая создание ATA)
         ATA_CREATION_COST_SOL = 0.00203928
         MINIMUM_GAS_FOR_FUTURE_TX = 0.00001
         TOTAL_REQUIRED_SOL = purchase_amount_sol + ATA_CREATION_COST_SOL + MINIMUM_GAS_FOR_FUTURE_TX
@@ -319,7 +303,6 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
             )
             return False
 
-        # --- ПРОДОЛЖАЕМ С ПОКУПКОЙ ---
         sol_to_spend_lamports = int(purchase_amount_sol * 1_000_000_000)
 
         swap_transaction = get_jupiter_swap_transaction_improved(
@@ -343,7 +326,6 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
                 logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
             return False
 
-        # Декодирование и подпись транзакции
         transaction_base64 = swap_transaction['swapTransaction']
         raw_txn = base64.b64decode(transaction_base64)
         logger.info(f"Успешно декодирована транзакция из base64, длина: {len(raw_txn)} байт")
@@ -354,7 +336,6 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
         signed_tx = VersionedTransaction(transaction.message, [keypair])
         raw_signed_txn = bytes(signed_tx)
 
-        # Проверка размера транзакции
         if len(raw_signed_txn) > 1232:
             logger.error(f"Транзакция слишком большая: {len(raw_signed_txn)} байт")
             try:
@@ -368,14 +349,12 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
                 logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
             return False
 
-        # Отправка транзакции
         client = Client(SOLANA_RPC_URL)
         tx_sig = client.send_raw_transaction(raw_signed_txn)
         logger.info(f"Транзакция покупки отправлена: {tx_sig}")
 
-        # Ожидание подтверждения
         start_time = time.time()
-        timeout = 30
+        timeout = 70
         while time.time() - start_time < timeout:
             try:
                 confirmation = client.confirm_transaction(tx_sig, commitment=Confirmed, sleep_seconds=1)
@@ -398,7 +377,6 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
                 logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
             return False
 
-        # --- ПОКУПКА УСПЕШНА ---
         logger.info(f"Покупка токена {token_address} для {user_id}/{wallet_name} завершена успешно.")
 
         profit_percentage = wallet_config.get('profit_percentage', 100.0)
@@ -529,6 +507,7 @@ async def get_token_balance(wallet_address: str, token_address: str) -> int:
     except Exception as e:
         logger.error(f"Ошибка получения баланса токена {token_address} для кошелька {wallet_address}: {e}")
         return 0
+
 async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bot) -> bool:
     logger.info(f"Попытка продажи токена {token_address} для {user_id}/{wallet_name}")
     wm = WalletManager()
@@ -556,7 +535,6 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
         token_name = token_metadata.get('name', 'Unknown')
         token_symbol = token_metadata.get('symbol', 'UNKNOWN')
 
-        # Получаем транзакцию свопа для продажи
         swap_transaction = get_jupiter_swap_transaction_improved(
             input_mint=token_address,
             output_mint="So11111111111111111111111111111111111111112",
@@ -569,7 +547,6 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
             logger.error(f"Не удалось получить транзакцию swap для продажи {token_address}")
             return False
 
-        # Декодируем и подписываем транзакцию
         try:
             transaction_base64 = swap_transaction['swapTransaction']
             raw_txn = base64.b64decode(transaction_base64)
@@ -582,14 +559,12 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
             logger.error(f"Ошибка при обработке или подписи транзакции продажи: {e}")
             return False
 
-        # Отправляем транзакцию
         client = Client(SOLANA_RPC_URL)
         tx_sig = client.send_raw_transaction(raw_signed_txn)
         logger.info(f"Транзакция продажи отправлена: {tx_sig}")
         
-        # Ожидаем подтверждения
         start_time = time.time()
-        timeout = 30
+        timeout = 70
         while time.time() - start_time < timeout:
             try:
                 confirmation = client.confirm_transaction(tx_sig, commitment=Confirmed, sleep_seconds=1)
@@ -604,7 +579,6 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
 
         logger.info(f"Продажа токена {token_address} для {user_id}/{wallet_name} завершена успешно.")
 
-        # Отправляем уведомление пользователю
         purchased_tokens_file = os.path.join(PURCHASED_TOKENS_DIR, f"{user_id}_{wallet_name}.json")
         purchase_price = 0.0
         purchase_amount = 0.0
@@ -649,11 +623,9 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
             logger.error(f"Ошибка отправки уведомления об ошибке пользователю {user_id}: {e}")
         return False
 
-# Новый код для мониторинга новых токенов
 NEW_TOKENS_FILE = os.path.join(PURCHASED_TOKENS_DIR, 'new_tokens.json')
 
 def save_new_token(token_address: str, token_data: dict):
-    """Сохраняет информацию о новом токене"""
     try:
         if not os.path.exists(NEW_TOKENS_FILE):
             new_tokens = {}
@@ -671,7 +643,6 @@ def save_new_token(token_address: str, token_data: dict):
         logger.error(f"Ошибка сохранения нового токена {token_address}: {e}")
 
 def get_new_tokens() -> dict:
-    """Получает список всех новых токенов"""
     try:
         if not os.path.exists(NEW_TOKENS_FILE):
             return {}
@@ -683,7 +654,6 @@ def get_new_tokens() -> dict:
         return {}
 
 async def monitor_new_tokens(bot: Bot):
-    """Мониторит цены новых токенов каждые 30 секунд"""
     while True:
         try:
             new_tokens = get_new_tokens()
@@ -697,7 +667,6 @@ async def monitor_new_tokens(bot: Bot):
                             profit_percent = ((current_price - purchase_price) / purchase_price) * 100
                             multiplier = current_price / purchase_price
                             
-                            # Отправляем уведомление о достижении целей
                             user_id = token_data.get('user_id')
                             wallet_name = token_data.get('wallet_name')
                             
@@ -728,23 +697,19 @@ async def monitor_new_tokens(bot: Bot):
                 except Exception as e:
                     logger.error(f"Ошибка мониторинга нового токена {token_address}: {e}")
             
-            await asyncio.sleep(30)  # Проверяем каждые 30 секунд
+            await asyncio.sleep(30)
             
         except Exception as e:
             logger.error(f"Ошибка в мониторинге новых токенов: {e}")
             await asyncio.sleep(30)
 
 async def start_monitoring(bot: Bot):
-    """Запускает мониторинг купленных токенов и новых токенов"""
-    # Создаем задачи для обоих мониторингов
     task1 = asyncio.create_task(monitor_purchased_tokens(bot))
     task2 = asyncio.create_task(monitor_new_tokens(bot))
     
-    # Ждем завершения обеих задач
     await asyncio.gather(task1, task2)
 
 async def monitor_purchased_tokens(bot: Bot):
-    """Оригинальный мониторинг купленных токенов каждые 60 секунд"""
     while True:
         try:
             wm = WalletManager()
@@ -759,21 +724,16 @@ async def monitor_purchased_tokens(bot: Bot):
             logger.error(f"Ошибка в мониторинге купленных токенов: {e}")
             await asyncio.sleep(60)
 
-# Обновленная функция покупки токена с сохранением в новые токены
 async def buy_token_with_monitoring(user_id: int, wallet_name: str, token_address: str, bot: Bot):
-    """Покупает токен и добавляет его в список для мониторинга новых токенов"""
     success = await buy_token(user_id, wallet_name, token_address, bot)
     
     if success:
-        # Получаем метаданные токена
         token_metadata = get_token_metadata(token_address)
         token_name = token_metadata.get('name', 'Unknown')
         token_symbol = token_metadata.get('symbol', 'UNKNOWN')
         
-        # Получаем текущую цену токена
         current_price = await get_token_current_price(token_address)
         
-        # Сохраняем токен в список новых токенов для мониторинга
         new_token_data = {
             "name": token_name,
             "symbol": token_symbol,
