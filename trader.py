@@ -7,7 +7,6 @@ import re
 import asyncio
 import base58
 import requests
-from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TokenAccountOpts
 from solders.pubkey import Pubkey
@@ -25,8 +24,6 @@ GROUP_CHAT_ID = "-1003071618300"
 TOPIC_MESSAGE_THREAD_ID = 61
 SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 PURCHASED_TOKENS_DIR = 'data/purchased_tokens'
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL = "https://lite-api.jup.ag/swap/v1/swap"
 url_pay = "https://t.me/KosmoNavt001"
 
 def get_user_config(user_id: int, wallet_name: str) -> dict:
@@ -167,7 +164,7 @@ def decode_jupiter_transaction(tx_data: str) -> bytes:
 def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amount: int,
                                         slippage: int, user_public_key: str) -> dict:
     try:
-        quote_url = f"{JUPITER_QUOTE_URL}?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={slippage}"
+        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={slippage}"
         quote_response = requests.get(quote_url, timeout=10)
 
         if quote_response.status_code != 200:
@@ -188,11 +185,11 @@ def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amo
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
-        swap_response = requests.post(JUPITER_SWAP_URL, json=swap_payload, headers=headers, timeout=10)
+        swap_response = requests.post("https://lite-api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
 
         if swap_response.status_code != 200:
             swap_payload["useSharedAccounts"] = True
-            swap_response = requests.post(JUPITER_SWAP_URL, json=swap_payload, headers=headers, timeout=10)
+            swap_response = requests.post("https://lite-api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
 
         if swap_response.status_code != 200:
             logger.error(f"Ошибка получения swap транзакции: {swap_response.status_code}")
@@ -209,6 +206,58 @@ def get_jupiter_swap_transaction(input_mint: str, output_mint: str, amount: int,
                                slippage: int, user_public_key: str) -> dict:
     return get_jupiter_swap_transaction_improved(input_mint, output_mint, amount, 
                                                slippage, user_public_key)
+
+def send_raw_transaction_via_rpc(raw_transaction_bytes: bytes, rpc_url: str, config: dict = None):
+    """
+    Отправляет подписанную транзакцию в кластер Solana через RPC метод sendTransaction.
+
+    Args:
+        raw_transaction_bytes (bytes): Подписанная транзакция в байтах.
+        rpc_url (str): URL Solana RPC сервера.
+        config (dict, optional): Дополнительная конфигурация для sendTransaction.
+
+    Returns:
+        str: Подпись транзакции, полученная от RPC.
+        
+    Raises:
+        Exception: Если RPC возвращает ошибку.
+    """
+    if config is None:
+        config = {}
+
+    # Кодируем транзакцию в base64
+    encoded_tx = base64.b64encode(raw_transaction_bytes).decode('utf-8')
+
+    # Подготавливаем параметры для RPC вызова
+    params = [encoded_tx, config]
+
+    # Формируем JSON-RPC тело запроса
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": params
+    }
+
+    # Отправляем POST-запрос
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    response = requests.post(rpc_url, json=payload, headers=headers, timeout=30)
+
+    if response.status_code != 200:
+        raise Exception(f"RPC request failed with status {response.status_code}: {response.text}")
+
+    response_json = response.json()
+
+    if "error" in response_json:
+        error_message = response_json["error"].get("message", "Unknown error")
+        raise Exception(f"RPC error: {error_message}")
+
+    if "result" not in response_json:
+        raise Exception("RPC response does not contain a 'result' field")
+
+    return response_json["result"]
 
 async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot):
     logger.info(f"Попытка покупки токена {token_address} для {user_id}/{wallet_name}")
@@ -349,20 +398,39 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
                 logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
             return False
 
-        client = Client(SOLANA_RPC_URL)
-        tx_sig = client.send_raw_transaction(raw_signed_txn)
-        logger.info(f"Транзакция покупки отправлена: {tx_sig}")
+        # Используем теперь напрямую RPC метод sendTransaction
+        config = {
+            "encoding": "base64",
+            "skipPreflight": False,
+            "preflightCommitment": "finalized"
+        }
+        tx_sig = send_raw_transaction_via_rpc(raw_signed_txn, SOLANA_RPC_URL, config)
+        logger.info(f"Транзакция покупки отправлена через RPC: {tx_sig}")
 
+        # Ожидание подтверждения
         start_time = time.time()
         timeout = 70
         while time.time() - start_time < timeout:
             try:
-                confirmation = client.confirm_transaction(tx_sig, commitment=Confirmed, sleep_seconds=1)
-                if confirmation.value[0] is not None:
-                    break
+                # Для проверки статуса можно использовать getSignatureStatuses
+                status_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getSignatureStatuses",
+                    "params": [[tx_sig]]
+                }
+                status_response = requests.post(SOLANA_RPC_URL, json=status_payload, timeout=10)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    if "result" in status_data and "value" in status_data["result"]:
+                        sig_status = status_data["result"]["value"][0]
+                        if sig_status is not None and sig_status["confirmationStatus"] in ["confirmed", "finalized"]:
+                            logger.info(f"Транзакция {tx_sig} подтверждена.")
+                            break
             except Exception as e:
-                logger.warning(f"Ожидание подтверждения транзакции: {e}")
-                await asyncio.sleep(2)
+                logger.warning(f"Проверка статуса транзакции: {e}")
+            
+            await asyncio.sleep(2)
         else:
             logger.error(f"Таймаут подтверждения транзакции: {tx_sig}")
             try:
@@ -483,25 +551,26 @@ async def check_and_sell_tokens(user_id: int, wallet_name: str, bot: Bot):
 
 async def get_token_balance(wallet_address: str, token_address: str) -> int:
     try:
-        client = Client(SOLANA_RPC_URL)
         opts = TokenAccountOpts(mint=Pubkey.from_string(token_address))
-        response = client.get_token_accounts_by_owner(
-            Pubkey.from_string(wallet_address),
-            opts
-        )
-        if hasattr(response, 'value') and response.value:
-            accounts = response.value
-            if accounts:
-                balance_str = accounts[0].account.data.parsed['info']['tokenAmount']['amount']
-                return int(balance_str)
-        elif isinstance(response, dict) and 'result' in response:
-            result = response['result']
-            if result and 'value' in result and result['value']:
-                accounts = result['value']
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                wallet_address,
+                {"mint": token_address},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        response = requests.post(SOLANA_RPC_URL, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if "result" in result and "value" in result["result"]:
+                accounts = result["result"]["value"]
                 if accounts:
-                    balance_str = accounts[0]['account']['data']['parsed']['info']['tokenAmount']['amount']
+                    balance_str = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
                     return int(balance_str)
-                    
         return 0
         
     except Exception as e:
@@ -559,20 +628,38 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
             logger.error(f"Ошибка при обработке или подписи транзакции продажи: {e}")
             return False
 
-        client = Client(SOLANA_RPC_URL)
-        tx_sig = client.send_raw_transaction(raw_signed_txn)
-        logger.info(f"Транзакция продажи отправлена: {tx_sig}")
+        # Используем теперь напрямую RPC метод sendTransaction для продажи
+        config = {
+            "encoding": "base64",
+            "skipPreflight": False,
+            "preflightCommitment": "finalized"
+        }
+        tx_sig = send_raw_transaction_via_rpc(raw_signed_txn, SOLANA_RPC_URL, config)
+        logger.info(f"Транзакция продажи отправлена через RPC: {tx_sig}")
         
+        # Ожидание подтверждения продажи
         start_time = time.time()
         timeout = 70
         while time.time() - start_time < timeout:
             try:
-                confirmation = client.confirm_transaction(tx_sig, commitment=Confirmed, sleep_seconds=1)
-                if confirmation.value[0] is not None:
-                    break
+                status_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getSignatureStatuses",
+                    "params": [[tx_sig]]
+                }
+                status_response = requests.post(SOLANA_RPC_URL, json=status_payload, timeout=10)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    if "result" in status_data and "value" in status_data["result"]:
+                        sig_status = status_data["result"]["value"][0]
+                        if sig_status is not None and sig_status["confirmationStatus"] in ["confirmed", "finalized"]:
+                            logger.info(f"Транзакция продажи {tx_sig} подтверждена.")
+                            break
             except Exception as e:
-                logger.warning(f"Ожидание подтверждения транзакции продажи: {e}")
-                await asyncio.sleep(2)
+                logger.warning(f"Проверка статуса транзакции продажи: {e}")
+            
+            await asyncio.sleep(2)
         else:
             logger.error(f"Таймаут подтверждения транзакции продажи: {tx_sig}")
             return False
@@ -625,7 +712,7 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
 
 NEW_TOKENS_FILE = os.path.join(PURCHASED_TOKENS_DIR, 'new_tokens.json')
 
-def save_new_token(token_address: str, token_data: dict):
+def save_new_token(token_address: str, token_data, dict):
     try:
         if not os.path.exists(NEW_TOKENS_FILE):
             new_tokens = {}
