@@ -1,0 +1,11 @@
+{
+  "wallets": {
+    "Wallet": {
+      "address": "J5BNDmEUvprbbviUKp3xA8vwahvGaGcnBESJFLfoZxPD",
+      "private_key": "E4sKV5HPbaBs5KXpXLNw1pgN5c2CemcP7a24spGJTaDTkrkrd392t4g31Dpc1T4CR5wLKxcd7wrVmhCngKLwFET",
+      "created_at": "1758356592.6688993",
+      "trade_percentage": 10.0,
+      "profit_percentage": 100.0
+    }
+  }
+}
