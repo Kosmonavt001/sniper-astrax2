@@ -18,6 +18,7 @@ SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 class WalletManager:
     def __init__(self):
         # Убедимся, что директория существует
+        self.wallets_dir = USER_CONFIGS_DIR
         os.makedirs(USER_CONFIGS_DIR, exist_ok=True)
 
     def _get_user_config_file(self, user_id: int) -> str:
@@ -137,7 +138,6 @@ class WalletManager:
             logger.error(f"Ошибка получения баланса для {wallet_address}: {e}")
             return 0.0
 
-    # --- НОВЫЕ МЕТОДЫ ДЛЯ ТОРГОВЛИ ---
     def get_wallet_private_key(self, user_id: int, wallet_name: str) -> str:
         """Получает приватный ключ кошелька пользователя"""
         wallets = self.get_user_wallets(user_id)
@@ -170,3 +170,36 @@ class WalletManager:
 
         user_config["wallets"][wallet_name].update(updates)
         self.save_user_config(user_id, user_config)
+    
+    def delete_wallet_config(self, user_id: int, wallet_name: str):
+        config_file = os.path.join(self.wallets_dir, f"{user_id}.json")
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                wallets = json.load(f)
+            if wallet_name in wallets:
+                del wallets[wallet_name]
+                # Если других кошельков у пользователя нет, удаляем весь файл
+                if not wallets:
+                    os.remove(config_file)
+                    logger.info(f"Файл конфигурации пользователя {user_id} удален, так как нет кошельков.")
+                else:
+                    with open(config_file, 'w') as f:
+                        json.dump(wallets, f, indent=2)
+                    logger.info(f"Кошелек {wallet_name} пользователя {user_id} удален из конфигурации.")
+            else:
+                logger.warning(f"Кошелек {wallet_name} не найден для пользователя {user_id} при попытке удаления.")
+        else:
+            logger.warning(f"Файл конфигурации {config_file} не найден при попытке удаления кошелька {wallet_name}.")
+    def get_all_wallets(self):
+        all_wallets = []
+        for filename in os.listdir(self.wallets_dir):
+            if filename.endswith('.json'):
+                try:
+                    user_id = int(filename.split('.')[0])
+                    user_config = self.load_user_config(user_id)
+                    for wallet_name in user_config.get("wallets", {}).keys():
+                        all_wallets.append((user_id, wallet_name))
+                except (ValueError, json.JSONDecodeError) as e:
+                    logger.warning(f"Проблема с файлом конфигурации {filename}: {e}")
+                    continue
+        return all_wallets
