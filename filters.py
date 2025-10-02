@@ -138,7 +138,7 @@ def check_token_scam_risk(token_address: str) -> dict:
         if created_at:
             created_time = datetime.fromtimestamp(created_at / 1000, tz=timezone.utc)
             created_str = created_time.strftime("%Y-%m-%d %H:%M UTC")
-        else:
+        else: 
             created_str = "Неизвестно"
 
         risk_score = 0
