@@ -1,0 +1,11 @@
+{
+  "wallets": {
+    "Aqua": {
+      "address": "2ppVUhQdq2NnkceEwXpBWC7zSApsZDfW9aBewJzM4vM5",
+      "private_key": "51V89NAPcCgXV1v5ufpJeXP4XJ6cvnHpP3ewQubjEJsgoJxa3XmZie5K1S14oFLHMPkjLihQiBU5CRBUKT4g6Jf1",
+      "created_at": "1758386795.1811037",
+      "trade_percentage": 1.0,
+      "profit_percentage": 100.0
+    }
+  }
+}
