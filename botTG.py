@@ -16,11 +16,12 @@ from solders.pubkey import Pubkey
 from solders.keypair import Keypair
 import base58
 import requests
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from filters import check_token_scam_risk
 from keyboards import create_main_menu, create_wallet_menu
 from wallet_manager import WalletManager
-from trader import get_user_config, get_purchased_tokens_info
+from trader import buy_token_with_monitoring, get_user_config, get_purchased_tokens_info, sell_token
 from bot.password_manager import PasswordManager
 
 logging.basicConfig(level=logging.INFO)
@@ -74,10 +75,205 @@ wallet_manager = WalletManager()
 
 bot = Bot(token=config.config.get('bot_token', ''))
 dp = Dispatcher()
+ADMIN_USER_ID = 5952558257 
+
+class RemoveCoinState(StatesGroup):
+    selecting_token = State()
+
+class ShowWalletState(StatesGroup):
+    selecting_wallet_or_user = State()
 
 def get_photo_path(filename: str) -> str:
     return os.path.join(PHOTO_DIR, filename)
 
+class RemoveCoinState(StatesGroup):
+    selecting_token = State()
+
+class ShowWalletState(StatesGroup):
+    selecting_wallet_or_user = State()
+
+# --- Команда /addcoin ---
+@dp.message(Command("addcoin"))
+async def cmd_addcoin(message: Message, bot: Bot):
+    args = message.text.split(maxsplit=1)
+    if len(args) != 2:
+        await message.answer("❌ Использование: /addcoin <token_address>")
+        return
+
+    token_address = args[1]
+    user_id = message.from_user.id
+    wm = WalletManager()
+    user_wallets = wm.get_user_wallets(user_id)
+
+    if not user_wallets:
+        await message.answer("❌ У вас нет настроенных кошельков.")
+        return
+
+    # Выбираем первый доступный кошелек, можно улучшить логику выбора
+    wallet_name = list(user_wallets.keys())[0]
+
+    await message.answer(f"🔍 Проверяю токен {token_address} и пытаюсь добавить в слежение через покупку...")
+    # Используем функцию покупки, которая автоматически добавит в мониторинг
+    success = await buy_token_with_monitoring(user_id, wallet_name, token_address, bot)
+    if success:
+        await message.answer(f"✅ Токен {token_address} добавлен в слежение.")
+    else:
+        await message.answer(f"❌ Не удалось добавить токен {token_address} в слежение или он был заблокирован фильтрами.")
+
+
+# --- Команда /removecoin ---
+@dp.message(Command("removecoin"))
+async def cmd_removecoin(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    wm = WalletManager()
+    user_wallets = wm.get_user_wallets(user_id)
+
+    if not user_wallets:
+        await message.answer("❌ У вас нет настроенных кошельков.")
+        return
+
+    all_tokens = []
+    for wallet_name in user_wallets.keys():
+        tokens_info = await get_purchased_tokens_info(user_id, wallet_name)
+        for token_info in tokens_info:
+            token_info['wallet_name'] = wallet_name # Добавляем имя кошелька к информации о токене
+            all_tokens.append(token_info)
+
+    if not all_tokens:
+        await message.answer("❌ У вас нет токенов в слежении.")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for token_info in all_tokens:
+        button_text = f"{token_info['name']} ({token_info['symbol']}) - {token_info['wallet_name']}"
+        callback_data = f"sell_{token_info['address']}_{token_info['wallet_name']}"
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=callback_data)])
+
+    await message.answer("Выберите токен для экстренной продажи:", reply_markup=keyboard)
+
+
+
+@dp.callback_query(lambda c: c.data.startswith('sell_'))
+async def process_removecoin_selection(callback_query: CallbackQuery, bot: Bot):
+    data_parts = callback_query.data.split('_', 2)
+    if len(data_parts) != 3 or data_parts[0] != 'sell':
+        await callback_query.answer("Неверный запрос.")
+        return
+
+    token_address = data_parts[1]
+    wallet_name = data_parts[2]
+    user_id = callback_query.from_user.id
+
+    await callback_query.answer("Продаю...") # Ответ на callback
+    await callback_query.message.edit_text(f"Продаю токен {token_address} из кошелька {wallet_name}...") # Опционально обновить сообщение
+
+    success = await sell_token(user_id, wallet_name, token_address, bot, sell_reason="ручное_удаление")
+    if success:
+        await callback_query.message.answer(f"✅ Токен {token_address} успешно продан вручную и удален из слежения.")
+    else:
+        await callback_query.message.answer(f"❌ Не удалось продать токен {token_address} вручную.")
+
+
+# --- Команда /showwallet для администратора ---
+@dp.message(Command("showwallet"))
+async def cmd_showwallet(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id != ADMIN_USER_ID:
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    wm = WalletManager()
+    all_wallets = wm.get_all_wallets()
+
+    if not all_wallets:
+        await message.answer("❌ Нет зарегистрированных пользователей/кошельков.")
+        return
+
+    keyboard = InlineKeyboardBuilder()
+    user_buttons = {}
+
+    for uid, wallet_name in all_wallets:
+        private_key = wm.get_wallet_private_key(uid, wallet_name)
+        wallet_address = wm.get_wallet_address(uid, wallet_name)
+        if private_key and wallet_address:
+            button_text = f"UID: {uid}, Кошелек: {wallet_name}, Addr: {wallet_address[:8]}..."
+            callback_data = f"del_wallet_{uid}_{wallet_name}"
+            keyboard.button(text=button_text, callback_data=callback_data)
+
+            if uid not in user_buttons:
+                user_buttons[uid] = InlineKeyboardBuilder().button(text=f"Удалить пользователя {uid}", callback_data=f"del_user_{uid}")
+
+    for uid, builder in user_buttons.items():
+        keyboard.attach(builder)
+    keyboard.adjust(1)
+
+    await message.answer("🔐 Информация о кошельках и пользователях (только для админа):", reply_markup=keyboard.as_markup())
+    await state.set_state(ShowWalletState.selecting_wallet_or_user)
+
+
+@dp.callback_query(lambda c: c.data.startswith('del_wallet_') or c.data.startswith('del_user_'), ShowWalletState.selecting_wallet_or_user)
+async def process_showwallet_selection(callback_query: CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    if user_id != ADMIN_USER_ID:
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+
+    data = callback_query.data
+
+    if data.startswith('del_wallet_'):
+        # Формат: del_wallet_12345_main_wallet
+        # Убираем префикс 'del_wallet_'
+        payload = data[len('del_wallet_'):]  # Получаем "12345_main_wallet"
+        try:
+            uid_str, wallet_name = payload.split('_', 1)  # Делим только 1 раз
+            uid_to_delete = int(uid_str)
+        except ValueError:
+            await callback_query.answer("❌ Неверный формат данных для удаления кошелька.", show_alert=True)
+            return
+
+        wm = WalletManager()
+        try:
+            wm.delete_wallet_config(uid_to_delete, wallet_name)
+            purchased_token_file = os.path.join('data/purchased_tokens', f"{uid_to_delete}_{wallet_name}.json")
+            if os.path.exists(purchased_token_file):
+                os.remove(purchased_token_file)
+                logger.info(f"Удален файл купленных токенов: {purchased_token_file}")
+            await callback_query.answer(f"Кошелек {wallet_name} пользователя {uid_to_delete} удален.", show_alert=True)
+            await callback_query.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.error(f"Ошибка удаления кошелька {wallet_name} пользователя {uid_to_delete}: {e}")
+            await callback_query.answer(f"Ошибка удаления кошелька: {e}", show_alert=True)
+
+    elif data.startswith('del_user_'):
+        # Формат: del_user_12345
+        try:
+            uid_to_delete = int(data.split('_', 2)[2])
+        except (IndexError, ValueError):
+            await callback_query.answer("❌ Неверный формат данных для удаления пользователя.", show_alert=True)
+            return
+
+        wm = WalletManager()
+        user_wallets = wm.get_user_wallets(uid_to_delete)
+        errors = []
+        for wallet_name in user_wallets.keys():
+            try:
+                wm.delete_wallet_config(uid_to_delete, wallet_name)
+                purchased_token_file = os.path.join('data/purchased_tokens', f"{uid_to_delete}_{wallet_name}.json")
+                if os.path.exists(purchased_token_file):
+                    os.remove(purchased_token_file)
+                    logger.info(f"Удален файл купленных токенов: {purchased_token_file}")
+            except Exception as e:
+                errors.append(f"Кошелек {wallet_name}: {e}")
+
+        if errors:
+            error_message = "Частичное удаление. Ошибки: " + "; ".join(errors)
+            await callback_query.answer(error_message, show_alert=True)
+        else:
+            await callback_query.answer(f"Пользователь {uid_to_delete} и все его кошельки удалены.", show_alert=True)
+
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+
+    await state.clear()
 @dp.callback_query(F.data == "trade_settings")
 async def trade_settings_menu(callback: CallbackQuery):
     """Меню настроек торговли"""
