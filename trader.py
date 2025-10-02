@@ -1,3 +1,5 @@
+#trader.py
+
 import base64
 import logging
 import json
@@ -164,7 +166,7 @@ def decode_jupiter_transaction(tx_data: str) -> bytes:
 def get_jupiter_swap_transaction_improved(input_mint: str, output_mint: str, amount: int,
                                         slippage: int, user_public_key: str) -> dict:
     try:
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={slippage}"
+        quote_url = f"https://lite-api.jup.ag/swap/v1/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={slippage}"
         quote_response = requests.get(quote_url, timeout=10)
 
         if quote_response.status_code != 200:
@@ -502,48 +504,96 @@ async def buy_token(user_id: int, wallet_name: str, token_address: str, bot: Bot
         return False
 
 async def check_and_sell_tokens(user_id: int, wallet_name: str, bot: Bot):
-    logger.info(f"Проверка целей продажи для {user_id}/{wallet_name}")
+    logger.info(f"Проверка целей продажи и убытков для {user_id}/{wallet_name}")
     purchased_tokens_file = os.path.join(PURCHASED_TOKENS_DIR, f"{user_id}_{wallet_name}.json")
-    
+    last_check_file = os.path.join(PURCHASED_TOKENS_DIR, f"{user_id}_{wallet_name}_last_check.json") # Файл для логов/состояния
+
     if not os.path.exists(purchased_tokens_file):
         logger.info(f"Нет купленных токенов для {user_id}/{wallet_name}")
         return
-        
+
     try:
         with open(purchased_tokens_file, 'r') as f:
             purchased_tokens = json.load(f)
-            
+
+        # Загрузка состояния последней проверки
+        last_check_data = {}
+        if os.path.exists(last_check_file):
+            try:
+                with open(last_check_file, 'r') as f:
+                    last_check_data = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Файл состояния {last_check_file} поврежден, создается новый.")
+
         updated_tokens = {}
-        sold_any = False
-        
+        sold_any = False # Флаг для отслеживания продаж в этом цикле
         for token_address, token_data in purchased_tokens.items():
             current_price_usdt = await get_token_current_price(token_address)
             if current_price_usdt <= 0:
                 logger.warning(f"Не удалось получить цену для купленного токена {token_address}. Пропуск.")
                 updated_tokens[token_address] = token_data
                 continue
-                
+
             purchase_price = token_data.get('purchase_price_usdt', 0)
             target_price = token_data.get('target_price_usdt', 0)
+            profit_percentage_target = token_data.get('profit_percentage_target', 100.0) # Добавлено для уведомления
 
+            # Обновляем текущую цену в данных токена
             token_data['current_price_usdt'] = current_price_usdt
-            updated_tokens[token_address] = token_data
 
-            if current_price_usdt >= target_price and target_price > 0:
-                logger.info(f"Цель продажи достигнута для {token_address} ({current_price_usdt} >= {target_price}). Продажа...")
-                sold = await sell_token(user_id, wallet_name, token_address, bot)
+            # --- НОВОЕ: Проверка убытка ---
+            loss_threshold = 0.8 * purchase_price # 20% убыток
+            if current_price_usdt <= loss_threshold:
+                logger.info(f"Токен {token_address} упал до {current_price_usdt}, что ниже порога убытка ({loss_threshold}). Продажа...")
+                # Устанавливаем целевую цену равной текущей для продажи по рынку
+                token_data['target_price_usdt'] = current_price_usdt
+                sold = await sell_token(user_id, wallet_name, token_address, bot, sell_reason="убыток_20%") # Передаем причину
                 if sold:
                     sold_any = True
-                    if token_address in updated_tokens:
-                        del updated_tokens[token_address]
+                    # Удаляем токен из обновленного списка
+                    # Не добавляем в updated_tokens
+                    continue # Переходим к следующему токену
                 else:
+                    # Если продажа не удалась, сохраняем текущее состояние
                     updated_tokens[token_address] = token_data
+                    continue # Переходим к следующему токену
 
+            # --- Проверка цели прибыли ---
+            # Добавим условие: не продавать, если цена ниже цены покупки (чтобы не продавать в убыток по цели)
+            if current_price_usdt >= target_price and target_price > 0 and current_price_usdt >= purchase_price * 0.9:
+                logger.info(f"Цель продажи достигнута для {token_address} ({current_price_usdt} >= {target_price}). Продажа...")
+                sold = await sell_token(user_id, wallet_name, token_address, bot, sell_reason=f"цель_{profit_percentage_target}%") # Передаем причину
+                if sold:
+                    sold_any = True
+                    # Удаляем токен из обновленного списка
+                    # Не добавляем в updated_tokens
+                    continue # Переходим к следующему токену
+                else:
+                    # Если продажа не удалась, сохраняем текущее состояние
+                    updated_tokens[token_address] = token_data
+                    continue # Переходим к следующему токену
+
+            # Если токен не продан, сохраняем его в обновленный список
+            updated_tokens[token_address] = token_data
+
+        # Если были продажи, обновляем файл купленных токенов
         if sold_any:
             with open(purchased_tokens_file, 'w') as f:
                 json.dump(updated_tokens, f, indent=2)
-            logger.info(f"Список купленных токенов для {user_id}/{wallet_name} обновлен.")
-            
+            logger.info(f"Список купленных токенов для {user_id}/{wallet_name} обновлен после продажи.")
+
+        # Сохраняем текущее состояние (цены) в файл последней проверки
+        current_check_data = {}
+        for token_address, token_data in updated_tokens.items(): # Обновленный список после продаж
+            current_check_data[token_address] = {
+                "current_price_usdt": token_data.get('current_price_usdt', 0),
+                "last_check_time": time.time()
+            }
+
+        os.makedirs(os.path.dirname(last_check_file), exist_ok=True)
+        with open(last_check_file, 'w') as f:
+            json.dump(current_check_data, f, indent=2)
+
     except json.JSONDecodeError as e:
         logger.error(f"Ошибка декодирования JSON из файла {purchased_tokens_file}: {e}")
     except Exception as e:
@@ -577,7 +627,7 @@ async def get_token_balance(wallet_address: str, token_address: str) -> int:
         logger.error(f"Ошибка получения баланса токена {token_address} для кошелька {wallet_address}: {e}")
         return 0
 
-async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bot) -> bool:
+async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bot, sell_reason: str = "цель") -> bool:
     logger.info(f"Попытка продажи токена {token_address} для {user_id}/{wallet_name}")
     wm = WalletManager()
     
@@ -616,7 +666,7 @@ async def sell_token(user_id: int, wallet_name: str, token_address: str, bot: Bo
             logger.error(f"Не удалось получить транзакцию swap для продажи {token_address}")
             return False
 
-        try:
+        try: 
             transaction_base64 = swap_transaction['swapTransaction']
             raw_txn = base64.b64decode(transaction_base64)
             transaction = VersionedTransaction.from_bytes(raw_txn)
@@ -799,12 +849,13 @@ async def start_monitoring(bot: Bot):
 async def monitor_purchased_tokens(bot: Bot):
     while True:
         try:
-            wm = WalletManager()
-            all_wallets = wm.get_all_wallets()
-            
-            for user_id, wallet_name in all_wallets:
-                await check_and_sell_tokens(user_id, wallet_name, bot)
-                
+            wm = WalletManager() # Инициализация WalletManager
+            all_wallets = wm.get_all_wallets() # Получить все кошельки всех пользователей
+            logger.info(f"Найдено {len(all_wallets)} кошельков для проверки.")
+            for user_id, wallet_name in all_wallets: # Перебрать все
+                logger.info(f"Проверка целей продажи для {user_id}/{wallet_name}")
+                await check_and_sell_tokens(user_id, wallet_name, bot) # Вызвать проверку для каждого
+              
             await asyncio.sleep(60)
             
         except Exception as e:
